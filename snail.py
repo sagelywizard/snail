@@ -111,7 +111,7 @@ class AttentionBlock(nn.Module):
         dims (int): the number of dimensions (or channels) of each element in
             the input sequence
         k_size (int): the size of the attention keys
-        k_size (int): the size of the attention values
+        v_size (int): the size of the attention values
         seq_len (int): the length of the input and output sequences
     """
     def __init__(self, dims, k_size, v_size, seq_len):
