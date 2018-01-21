@@ -125,8 +125,7 @@ class AttentionBlock(nn.Module):
         keys = self.key_layer(minibatch)
         queries = self.query_layer(minibatch)
         values = self.value_layer(minibatch)
-        # use permute to do transpose for entire batch
-        logits = torch.bmm(queries, keys.permute(0,2,1))
+        logits = torch.bmm(queries, keys.transpose(2,1))
         # Use numpy triu because you can't do 3D triu with PyTorch
         # TODO: using float32 here might break for non FloatTensor inputs.
         # Should update this later to use numpy/PyTorch types of the input.
