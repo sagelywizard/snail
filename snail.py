@@ -14,7 +14,6 @@ The three building blocks are the following:
 """
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,11 +23,16 @@ from torch.autograd import Variable
 class CausalConv1d(nn.Module):
     """A 1D causal convolution layer.
 
+    Input: (B, D_in, T), where B is the minibatch size, D_in is the number of
+        dimensions per step, and T is the number of steps.
+    Output: (B, D_out, T), where B is the minibatch size, D_out is the number
+        of dimensions in the output, and T is the number of steps.
+
     Arguments:
         in_channels (int): number of input channels
         out_channels (int): number of output channels
     """
-    def __init__(self, in_channels, out_channels, dilation=2):
+    def __init__(self, in_channels, out_channels, dilation=1):
         super(CausalConv1d, self).__init__()
         self.padding = dilation
         self.causal_conv = nn.Conv1d(
@@ -36,7 +40,8 @@ class CausalConv1d(nn.Module):
             out_channels,
             2,
             padding = self.padding,
-            dilation = dilation)
+            dilation = dilation
+        )
 
     def forward(self, minibatch):
         return self.causal_conv(minibatch)[:, :, :-self.padding]
@@ -45,24 +50,28 @@ class CausalConv1d(nn.Module):
 class DenseBlock(nn.Module):
     """Two parallel 1D causal convolution layers w/tanh and sigmoid activations
 
-    The output is `Bx(C+D)xT` where `B` is the minibatch size, `C` is the
-    number of input channels, `D` is the number of filters, and `T` is the
-    length of the input sequence.
+    Input: (B, D_in, T), where B is the minibatch size, D_in is the number of
+        dimensions of the input, and T is the number of steps.
+    Output: (B, D_in+F, T), where where `B` is the minibatch size, `D_in` is the
+        number of dimensions of the input, `F` is the number of filters, and `T`
+        is the length of the input sequence.
 
     Arguments:
         in_channels (int): number of input channels
         filters (int): number of filters per channel
     """
-    def __init__(self, in_channels, filters, dilation=2):
+    def __init__(self, in_channels, filters, dilation=1):
         super(DenseBlock, self).__init__()
         self.causal_conv1 = CausalConv1d(
             in_channels,
             filters,
-            dilation=dilation)
+            dilation=dilation
+        )
         self.causal_conv2 = CausalConv1d(
             in_channels,
             filters,
-            dilation=dilation)
+            dilation=dilation
+        )
 
     def forward(self, minibatch):
         tanh = F.tanh(self.causal_conv1(minibatch))
@@ -76,13 +85,19 @@ class TCBlock(nn.Module):
 
     The TCBlock adds `ceil(log_2(seq_len))*filters` channels to the output.
 
+    Input: (B, D_in, T), where B is the minibatch size, D_in is the number of
+        dimensions of the input, and T is the number of steps.
+    Output: (B, D_in+F, T), where where `B` is the minibatch size, `D_in` is the
+        number of dimensions of the input, `F` is the number of filters, and `T`
+        is the length of the input sequence.
+
     Arguments:
         in_channels (int): channels for the input
-        filters (int): number of filters per channel
         seq_len (int): length of the sequence. The number of denseblock layers
             is log base 2 of `seq_len`.
+        filters (int): number of filters per channel
     """
-    def __init__(self, in_channels, filters, seq_len):
+    def __init__(self, in_channels, seq_len, filters):
         super(TCBlock, self).__init__()
         layer_count = math.ceil(math.log(seq_len)/math.log(2))
         blocks = []
@@ -100,40 +115,36 @@ class TCBlock(nn.Module):
 class AttentionBlock(nn.Module):
     """An attention mechanism similar to Vaswani et al (2017)
 
-    The input of the AttentionBlock is `BxTxD` where `B` is the input
-    minibatch size, `T` is the length of the sequence `D` is the dimensions of
-    each feature.
+    The input of the AttentionBlock is `BxDxT` where `B` is the input
+    minibatch size, `D` is the dimensions of each feature, `T` is the length of
+    the sequence.
 
-    The output of the AttentionBlock is `BxTx(D+V)` where `V` is the size of the
+    The output of the AttentionBlock is `Bx(D+V)xT` where `V` is the size of the
     attention values.
 
     Arguments:
-        dims (int): the number of dimensions (or channels) of each element in
-            the input sequence
+        input_dims (int): the number of dimensions (or channels) of each element
+            in the input sequence
         k_size (int): the size of the attention keys
         v_size (int): the size of the attention values
-        seq_len (int): the length of the input and output sequences
     """
-    def __init__(self, dims, k_size, v_size, seq_len):
+    def __init__(self, input_dims, k_size, v_size):
         super(AttentionBlock, self).__init__()
-        self.key_layer = nn.Linear(dims, k_size)
-        self.query_layer = nn.Linear(dims, k_size)
-        self.value_layer = nn.Linear(dims, v_size)
+        self.key_layer = nn.Linear(input_dims, k_size)
+        self.query_layer = nn.Linear(input_dims, k_size)
+        self.value_layer = nn.Linear(input_dims, v_size)
         self.sqrt_k = math.sqrt(k_size)
 
     def forward(self, minibatch):
+        minibatch = minibatch.permute(0,2,1)
         keys = self.key_layer(minibatch)
         queries = self.query_layer(minibatch)
         values = self.value_layer(minibatch)
         logits = torch.bmm(queries, keys.transpose(2,1))
-        # Use numpy triu because you can't do 3D triu with PyTorch
-        # TODO: using float32 here might break for non FloatTensor inputs.
-        # Should update this later to use numpy/PyTorch types of the input.
-        mask = np.triu(np.ones(logits.size()), k=1).astype('uint8')
-        mask = torch.from_numpy(mask)
-        # do masked_fill_ on data rather than Variable because PyTorch doesn't
-        # support masked_fill_ w/-inf directly on Variables for some reason.
+        mask = logits.data.new(logits.size(1), logits.size(2)).fill_(1).byte()
+        mask = torch.triu(mask, 1)
+        mask = mask.unsqueeze(0).expand_as(logits)
         logits.data.masked_fill_(mask, float('-inf'))
-        probs = F.softmax(logits, dim=1) / self.sqrt_k
+        probs = F.softmax(logits / self.sqrt_k, dim=2)
         read = torch.bmm(probs, values)
-        return torch.cat([minibatch, read], dim=2)
+        return torch.cat([minibatch, read], dim=2).permute(0,2,1)
