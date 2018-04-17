@@ -21,45 +21,58 @@ class KShotSampler(torch.utils.data.sampler.Sampler):
         n (integer): the number of classes to sample per minibatch
         k (integer): the number of examples per class to return for each
             minibatch
-        query_size (integer): the size of the query set for each class
-        support_size (integer): the size of the support set for each class
+        class_size (integer): the number of examples per class
     """
-    def __init__(self, dataset, n, k, query_size=10, support_size=10):
+    def __init__(self, dataset, n, k, class_size=20):
         self.n = n
         self.k = k
-        self.query_size = query_size
-        self.support_size = support_size 
-        self.examples_per_class = query_size + support_size
+        self.class_size = class_size
         self.dataset = dataset
 
     def __iter__(self):
         indexes = list(range(len(self)))
         np.random.shuffle(indexes)
-        ret = []
 
         for i in range(0, len(self), self.n):
+            # if there aren't enough remaining classes for a batch, stop
+            if len(self) - i < self.n:
+                raise StopIteration
+            support = []
             classes = list(enumerate(indexes[i:i+self.n]))
-            label_class = random.choice(classes)
-            ret = []
-            for cls_i, cls in enumerate(classes):
+            # shuffle the classes, so the query class isn't always the same
+            # index
+            np.random.shuffle(classes)
+            # initialize first class, which will be the query class
+            k_offsets = np.random.choice(
+                self.class_size,
+                size=self.k+1,
+                replace=False
+            )
+            # add k samples of first class to support set
+            support = [(
+                self.dataset[(classes[0][1]*self.class_size)+offset][0],
+                classes[0][0]
+            ) for offset in k_offsets[0:-1]]
+            query = (self.dataset[(classes[0][1]*self.class_size)+k_offsets[-1]][0], classes[0][0])
+            # populate the support set with the remaining classes
+            for cls_i, cls in classes[1:]:
                 k_offsets = np.random.choice(
-                    self.query_size,
+                    self.class_size,
                     size=self.k,
                     replace=False
                 )
-                for k_offset in k_offsets:
-                    ret.append((
-                        self.dataset[(cls[1]*self.examples_per_class)+k_offset][0],
+                for offset in k_offsets:
+                    support.append((
+                        self.dataset[(cls*self.class_size)+offset][0],
                         cls_i
                     ))
-            offset = self.query_size + np.random.randint(self.support_size)
-            label = self.dataset[label_class[1]*self.examples_per_class+offset][0]
-            np.random.shuffle(ret)
-            yield ret, (label, label_class[0])
+            # shuffle the support set, so it's not in contiguous classes
+            np.random.shuffle(support)
+            yield support, query
             ret = []
 
     def __len__(self):
-        return len(self.dataset)//self.examples_per_class
+        return len(self.dataset)//self.class_size
 
 
 class KShotBatchToTensor(object):
